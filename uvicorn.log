@@ -1,0 +1,14 @@
+ INFO:     127.0.0.1:54415 - "OPTIONS /api/chat HTTP/1.1" 200 OK
+INFO:     127.0.0.1:54415 - "POST /api/chat HTTP/1.1" 404 Not Found
+INFO:     127.0.0.1:54417 - "POST /api/chat HTTP/1.1" 404 Not Found
+INFO:     127.0.0.1:52664 - "POST /api/chat HTTP/1.1" 404 Not Found
+INFO:     127.0.0.1:52664 - "POST /api/chat HTTP/1.1" 404 Not Found
+INFO:     127.0.0.1:52665 - "POST /api/chat HTTP/1.1" 404 Not Found
+INFO:     127.0.0.1:52746 - "POST /api/chat HTTP/1.1" 404 Not Found
+INFO:     127.0.0.1:52848 - "POST /api/chat HTTP/1.1" 404 Not Found
+INFO:     127.0.0.1:57847 - "POST /api/chat HTTP/1.1" 404 Not Found
+INFO:     127.0.0.1:57847 - "GET /docs HTTP/1.1" 200 OK
+INFO:     127.0.0.1:57872 - "GET /openapi.json HTTP/1.1" 200 OK
+INFO:     127.0.0.1:57905 - "POST /api/chat HTTP/1.1" 404 Not Found
+INFO:     127.0.0.1:57923 - "POST /api/chat HTTP/1.1" 404 Not Found
+INFO:     127.0.0.1:57923 - "GET /openapi.json HTTP/1.1" 200 OK
