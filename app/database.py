@@ -278,7 +278,7 @@ def get_listings(brand: str = None, model: str = None, year: int = None,
             conditions.append(f"LOWER(brand) = LOWER({add_param(str(brand))})")
         if model:
             conditions.append(f"LOWER(model) LIKE LOWER({add_param(f'%{model}%')})")
-        if year:
+        if year is not None:
             conditions.append(f"manufacturing_year = {add_param(int(year))}")
         if fuel:
             conditions.append(f"LOWER(fuel_type) = LOWER({add_param(str(fuel))})")
@@ -286,11 +286,11 @@ def get_listings(brand: str = None, model: str = None, year: int = None,
             conditions.append(f"LOWER(transmission) = LOWER({add_param(str(transmission))})")
         if location:
             conditions.append(f"LOWER(location) LIKE LOWER({add_param(f'%{location}%')})")
-        if min_price:
+        if min_price is not None:
             conditions.append(f"asking_price >= {add_param(int(min_price))}")
-        if max_price:
+        if max_price is not None:
             conditions.append(f"asking_price <= {add_param(int(max_price))}")
-        if max_km:
+        if max_km is not None:
             conditions.append(f"kilometres <= {add_param(int(max_km))}")
         if feed_type:
             conditions.append(f"feed_type = {add_param(str(feed_type))}")
@@ -299,6 +299,9 @@ def get_listings(brand: str = None, model: str = None, year: int = None,
         params.extend([int(limit), int(offset)])
         param_count += 2
         
+        limit_placeholder = f"${param_count-1}"
+        offset_placeholder = f"${param_count}"
+        
         return execute_query(
             f"""SELECT id, title, brand, model, variant, manufacturing_year,
                        registration_year, asking_price, kilometres, fuel_type,
@@ -306,7 +309,7 @@ def get_listings(brand: str = None, model: str = None, year: int = None,
                        images, listing_status, deal_score, fair_price_estimate,
                        price_status, source, source_url, first_seen_at, last_seen_at, feed_type
                 FROM listings WHERE {where}
-                ORDER BY last_seen_at DESC LIMIT ${param_count-1} OFFSET ${param_count}""",
+                ORDER BY last_seen_at DESC LIMIT {limit_placeholder} OFFSET {offset_placeholder}""",
             params
         )
     except Exception as e:
@@ -327,15 +330,15 @@ def get_listing_count(brand: str = None, model: str = None, year: int = None) ->
             return f"${param_count}"
         
         if brand:
-            conditions.append(f"LOWER(brand) = LOWER({add_param(brand)})")
+            conditions.append(f"LOWER(brand) = LOWER({add_param(str(brand))})")
         if model:
             conditions.append(f"LOWER(model) LIKE LOWER({add_param(f'%{model}%')})")
-        if year:
-            conditions.append(f"manufacturing_year = {add_param(year)}")
+        if year is not None:
+            conditions.append(f"manufacturing_year = {add_param(int(year))}")
         
         where = " AND ".join(conditions)
         rows = execute_query(f"SELECT COUNT(*) as c FROM listings WHERE {where}", params)
-        return rows[0].get("c", 0) if rows else 0
+        return int(rows[0].get("c", 0)) if rows else 0
     except Exception as e:
         logger.error(f"get_listing_count: {e}")
         return 0
