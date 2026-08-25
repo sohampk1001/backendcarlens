@@ -102,7 +102,8 @@ LISTINGS_TABLES = [
         published_at    TIMESTAMP,
         fetched_at      TIMESTAMP DEFAULT NOW(),
         processed       BOOLEAN DEFAULT FALSE,
-        raw_xml         TEXT
+        raw_xml         TEXT,
+        feed_type       TEXT DEFAULT 'used_cars'
     )
     """,
     # ── Listings ───────────────────────────────────────────────────
@@ -140,6 +141,7 @@ LISTINGS_TABLES = [
         deal_score              INTEGER,
         fair_price_estimate     BIGINT,
         price_status            TEXT,
+        feed_type               TEXT,
         created_at              TIMESTAMP DEFAULT NOW(),
         updated_at              TIMESTAMP DEFAULT NOW()
     )

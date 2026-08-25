@@ -705,16 +705,19 @@ async def search_listings(
     min_price: Optional[int] = None,
     max_price: Optional[int] = None,
     max_km: Optional[int] = None,
+    feed_type: Optional[str] = None,
     limit: int = 20,
     offset: int = 0,
 ):
     """Search used car listings from the listings database."""
     try:
         from app.database import get_listings, get_listing_count
+        
         listings = get_listings(
             brand=brand, model=model, year=year,
             fuel=fuel, transmission=transmission, location=location,
             min_price=min_price, max_price=max_price, max_km=max_km,
+            feed_type=feed_type,
             limit=limit, offset=offset,
         )
         total = get_listing_count(brand=brand, model=model, year=year)
@@ -724,6 +727,15 @@ async def search_listings(
             "limit": limit,
             "offset": offset,
             "has_more": (offset + limit) < total,
+            "filters_applied": {
+                "brand": brand,
+                "model": model,
+                "year": year,
+                "fuel": fuel,
+                "transmission": transmission,
+                "location": location,
+                "feed_type": feed_type,
+            }
         }
     except Exception as e:
         logger.exception(f"search_listings failed: {e}")
@@ -757,14 +769,26 @@ async def market_stats(
 # ── RSS Sync Endpoints ────────────────────────────────────────────────────────
 
 @router.post("/rss/sync")
-async def sync_rss():
-    """Fetch RSS feed and store new items. Trigger periodically."""
+async def sync_rss(feed_type: str = "used_cars"):
+    """Fetch RSS feed from specified type and store new items. Trigger periodically."""
     try:
         from app.services.rss_service import sync_rss_to_db
-        result = sync_rss_to_db()
+        result = sync_rss_to_db(feed_type)
         return result
     except Exception as e:
         logger.exception(f"RSS sync failed: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.post("/rss/sync/all")
+async def sync_all_rss():
+    """Sync all RSS feeds (used_cars, overall_both, new_cars)."""
+    try:
+        from app.services.rss_service import sync_all_rss_feeds
+        result = sync_all_rss_feeds()
+        return result
+    except Exception as e:
+        logger.exception(f"RSS sync all failed: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
 

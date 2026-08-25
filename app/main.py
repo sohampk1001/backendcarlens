@@ -86,7 +86,7 @@ async def startup_event():
     from app.database import init_db, _db_available
 
     if groq_service._groq_available:
-        logger.info("Groq LLM integration: ACTIVE (model: llama-3.3-70b-versatile)")
+        logger.info("Groq LLM integration: ACTIVE (model: llama-3.3-8b-8192 with fallbacks)")
     else:
         logger.warning("Groq LLM integration: UNAVAILABLE - using heuristic + mock fallback")
 

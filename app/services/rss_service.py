@@ -13,7 +13,11 @@ from email.utils import parsedate_to_datetime
 
 logger = logging.getLogger(__name__)
 
-RSS_FEED_URL = "https://rss.app/feeds/tSiBQ4IOv6Ev9AuE.xml"
+RSS_FEEDS = {
+    "used_cars": "https://rss.app/feeds/EnrHOeF75qroxLk9.xml",
+    "overall_both": "https://rss.app/feeds/I9BQDQdHIj2VK2ko.xml",
+    "new_cars": "https://rss.app/feeds/7tbyvT4e1grsoJjY.xml"
+}
 
 
 def _parse_date(date_str: Optional[str]) -> Optional[str]:
@@ -33,17 +37,22 @@ def _clean_html(text: Optional[str]) -> str:
     return clean[:2000]
 
 
-def fetch_rss_items() -> List[Dict]:
-    """Fetch and parse RSS XML. Returns list of parsed items."""
+def fetch_rss_items(feed_type: str = "used_cars") -> List[Dict]:
+    """Fetch and parse RSS XML from specified feed. Returns list of parsed items."""
+    feed_url = RSS_FEEDS.get(feed_type)
+    if not feed_url:
+        logger.error(f"Unknown feed type: {feed_type}")
+        return []
+    
     try:
         with warnings.catch_warnings():
             warnings.simplefilter("ignore")
-            resp = requests.get(RSS_FEED_URL, timeout=15, verify=False,
+            resp = requests.get(feed_url, timeout=15, verify=False,
                                 headers={"User-Agent": "CarLens-Bot/1.0"})
             resp.raise_for_status()
             xml = resp.text
     except Exception as e:
-        logger.error(f"RSS fetch failed: {e}")
+        logger.error(f"RSS fetch failed for {feed_type}: {e}")
         return []
 
     items = []
@@ -83,19 +92,20 @@ def fetch_rss_items() -> List[Dict]:
                 "image_url": image_url,
                 "published_at": pub_date,
                 "raw_xml": block[:500],
+                "feed_type": feed_type,
             })
 
     logger.info(f"RSS parsed {len(items)} items")
     return items
 
 
-def sync_rss_to_db() -> Dict:
+def sync_rss_to_db(feed_type: str = "used_cars") -> Dict:
     """
-    Fetch RSS, deduplicate, store new items.
+    Fetch RSS from specified feed, deduplicate, store new items.
     Returns sync summary.
     """
     from app.database import rss_item_exists, insert_rss_item
-    items = fetch_rss_items()
+    items = fetch_rss_items(feed_type)
     new_count = 0
     skipped = 0
     for item in items:
@@ -105,9 +115,41 @@ def sync_rss_to_db() -> Dict:
         if insert_rss_item(item):
             new_count += 1
     return {
+        "feed_type": feed_type,
         "total_fetched": len(items),
         "new_items": new_count,
         "skipped_duplicates": skipped,
+        "synced_at": datetime.now().isoformat(),
+    }
+
+
+def sync_all_rss_feeds() -> Dict:
+    """
+    Sync all RSS feeds (used_cars, overall_both, new_cars).
+    Returns combined sync summary.
+    """
+    results = {}
+    total_new = 0
+    total_fetched = 0
+    total_skipped = 0
+    
+    for feed_type in RSS_FEEDS.keys():
+        try:
+            result = sync_rss_to_db(feed_type)
+            results[feed_type] = result
+            total_new += result.get("new_items", 0)
+            total_fetched += result.get("total_fetched", 0)
+            total_skipped += result.get("skipped_duplicates", 0)
+        except Exception as e:
+            logger.error(f"Failed to sync {feed_type}: {e}")
+            results[feed_type] = {"error": str(e)}
+    
+    return {
+        "feeds_synced": list(RSS_FEEDS.keys()),
+        "results": results,
+        "total_fetched": total_fetched,
+        "total_new_items": total_new,
+        "total_skipped_duplicates": total_skipped,
         "synced_at": datetime.now().isoformat(),
     }
 
@@ -173,38 +215,39 @@ def process_unprocessed_items(limit: int = 10) -> Dict:
             mark_rss_item_processed(item["id"])
             processed += 1
 
-            if extracted.get("is_car_listing") and extracted.get("brand"):
-                listing_id = f"rss_{item['id']}_{uuid.uuid4().hex[:8]}"
-                listing = {
-                    "id": listing_id,
-                    "source": "rss_feed",
-                    "source_url": item.get("url"),
-                    "source_item_id": str(item.get("id")),
-                    "title": item.get("title"),
-                    "description": item.get("description"),
-                    "asking_price": extracted.get("asking_price"),
-                    "kilometres": extracted.get("kilometres"),
-                    "registration_year": extracted.get("registration_year"),
-                    "manufacturing_year": extracted.get("manufacturing_year"),
-                    "brand": extracted.get("brand"),
-                    "model": extracted.get("model"),
-                    "variant": extracted.get("variant"),
-                    "fuel_type": extracted.get("fuel_type"),
-                    "transmission": extracted.get("transmission"),
-                    "color": extracted.get("color"),
-                    "ownership": extracted.get("ownership"),
-                    "location": extracted.get("location"),
-                    "seller_type": extracted.get("seller_type"),
-                    "images": [item.get("image_url")] if item.get("image_url") else [],
-                    "published_at": item.get("published_at"),
-                    "listing_status": "ACTIVE_OBSERVED",
-                    "extraction_status": "COMPLETED",
-                    "vehicle_match_confidence": extracted.get("confidence", "low").upper()
-                        if extracted.get("confidence") in ("high", "medium") else "NEEDS_VERIFICATION",
-                    "groq_extracted": extracted,
-                }
-                if upsert_listing(listing):
-                    added_listings += 1
+            # Store RSS items even if Groq extraction fails, for manual review
+            listing_id = f"rss_{item['id']}_{uuid.uuid4().hex[:8]}"
+            listing = {
+                "id": listing_id,
+                "source": "rss_feed",
+                "feed_type": item.get("feed_type", "used_cars"),
+                "source_url": item.get("url"),
+                "source_item_id": str(item.get("id")),
+                "title": item.get("title"),
+                "description": item.get("description"),
+                "asking_price": extracted.get("asking_price"),
+                "kilometres": extracted.get("kilometres"),
+                "registration_year": extracted.get("registration_year"),
+                "manufacturing_year": extracted.get("manufacturing_year"),
+                "brand": extracted.get("brand"),
+                "model": extracted.get("model"),
+                "variant": extracted.get("variant"),
+                "fuel_type": extracted.get("fuel_type"),
+                "transmission": extracted.get("transmission"),
+                "color": extracted.get("color"),
+                "ownership": extracted.get("ownership"),
+                "location": extracted.get("location"),
+                "seller_type": extracted.get("seller_type"),
+                "images": [item.get("image_url")] if item.get("image_url") else [],
+                "published_at": item.get("published_at"),
+                "listing_status": "ACTIVE_OBSERVED",
+                "extraction_status": "COMPLETED" if extracted.get("is_car_listing") else "PENDING_MANUAL_REVIEW",
+                "vehicle_match_confidence": extracted.get("confidence", "low").upper()
+                    if extracted.get("confidence") in ("high", "medium") else "NEEDS_VERIFICATION",
+                "groq_extracted": extracted,
+            }
+            if upsert_listing(listing):
+                added_listings += 1
         except Exception as e:
             logger.error(f"process_item {item.get('id')}: {e}")
 

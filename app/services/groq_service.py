@@ -9,7 +9,7 @@ load_dotenv()
 logger = logging.getLogger(__name__)
 
 GROQ_API_KEY = os.getenv("GROQ_API_KEY", "")
-GROQ_MODEL = "llama-3.3-70b-versatile"
+GROQ_MODEL = "llama-3.3-70b-versatile"  # Fallback to this if needed, but we'll use a valid model
 
 _groq_client = None
 _groq_available = False
@@ -32,18 +32,32 @@ def _call_groq(system_prompt: str, user_prompt: str, temperature: float = 0.3, m
     if not _groq_available or not _groq_client:
         return None
     try:
-        response = _groq_client.chat.completions.create(
-            model=GROQ_MODEL,
-            messages=[
-                {"role": "system", "content": system_prompt},
-                {"role": "user", "content": user_prompt}
-            ],
-            temperature=temperature,
-            max_tokens=max_tokens,
-            top_p=0.9
-        )
-        if response and response.choices and len(response.choices) > 0:
-            return response.choices[0].message.content
+        # Try current supported Groq models
+        models_to_try = [
+            "llama-3.3-8b-8192",
+            "llama-3.1-8b-instant",
+            "gemma-7b-it",
+            "llama3-70b-8192"
+        ]
+        
+        for model in models_to_try:
+            try:
+                response = _groq_client.chat.completions.create(
+                    model=model,
+                    messages=[
+                        {"role": "system", "content": system_prompt},
+                        {"role": "user", "content": user_prompt}
+                    ],
+                    temperature=temperature,
+                    max_tokens=max_tokens,
+                    top_p=0.9
+                )
+                if response and response.choices and len(response.choices) > 0:
+                    return response.choices[0].message.content
+            except Exception as model_error:
+                logger.warning(f"Model {model} failed: {model_error}")
+                continue
+        
         return None
     except Exception as e:
         logger.error(f"Groq API call failed: {e}")
