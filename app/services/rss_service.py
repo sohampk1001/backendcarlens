@@ -7,16 +7,19 @@ import uuid
 import logging
 import warnings
 import requests
+import os
 from datetime import datetime
 from typing import List, Dict, Optional
 from email.utils import parsedate_to_datetime
+from dotenv import load_dotenv
 
+load_dotenv()
 logger = logging.getLogger(__name__)
 
 RSS_FEEDS = {
-    "used_cars": "https://rss.app/feeds/EnrHOeF75qroxLk9.xml",
-    "overall_both": "https://rss.app/feeds/I9BQDQdHIj2VK2ko.xml",
-    "new_cars": "https://rss.app/feeds/7tbyvT4e1grsoJjY.xml"
+    "used_cars": os.getenv("RSS_FEED_USED_CARS", "https://rss.app/feeds/EnrHOeF75qroxLk9.xml"),
+    "overall_both": os.getenv("RSS_FEED_OVERALL_BOTH", "https://rss.app/feeds/I9BQDQdHIj2VK2ko.xml"),
+    "new_cars": os.getenv("RSS_FEED_NEW_CARS", "https://rss.app/feeds/7tbyvT4e1grsoJjY.xml")
 }
 
 
