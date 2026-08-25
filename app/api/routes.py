@@ -82,14 +82,30 @@ def _fill_defaults(vehicle: VehicleDetails) -> VehicleDetails:
     if not data.get("brand") and not data.get("model"):
         data["brand"] = "Unknown"
         data["model"] = "Unknown"
-    if not data.get("manufacturing_year"):
-        data["manufacturing_year"] = 2020
-    if not data.get("kilometers_driven"):
-        data["kilometers_driven"] = 50000
-    if not data.get("asking_price"):
-        data["asking_price"] = 500000
     if not data.get("location"):
         data["location"] = "India"
+    return VehicleDetails(**data)
+
+
+def _merge_identified_from_images(vehicle: VehicleDetails, image_results: List[Dict[str, Any]]) -> VehicleDetails:
+    data = vehicle.model_dump()
+    field_map = {
+        "brand": "brand",
+        "model": "model",
+        "variant": "variant",
+        "manufacturing_year": "manufacturing_year",
+        "color": "color",
+        "body_type": "body_type",
+    }
+    for result in image_results or []:
+        ident = result.get("identified_vehicle") or {}
+        for src, dest in field_map.items():
+            val = ident.get(src)
+            if val in (None, "", 0):
+                continue
+            current = data.get(dest)
+            if current in (None, "", "Unknown", "Not specified"):
+                data[dest] = val
     return VehicleDetails(**data)
 
 
@@ -196,7 +212,6 @@ async def analyze_images(
                 vehicle = VehicleDetails(**data)
             except Exception as pe:
                 logger.warning(f"Parsing vehicle_json failed: {pe}. Using defaults.")
-        vehicle = _fill_defaults(vehicle)
 
         images_b64 = []
         for f in files:
@@ -211,6 +226,8 @@ async def analyze_images(
 
         vehicle_dict = vehicle.model_dump()
         image_results_raw = gemini_service.analyze_multiple_images(images_b64, vehicle_dict)
+        vehicle = _merge_identified_from_images(vehicle, image_results_raw)
+        vehicle = _fill_defaults(vehicle)
         image_scores = [r.get("condition_score", 70) for r in image_results_raw]
 
         image_analyses = []

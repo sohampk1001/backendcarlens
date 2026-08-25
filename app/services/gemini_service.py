@@ -104,9 +104,17 @@ def analyze_vehicle_image(image_b64: str, vehicle_context: Optional[Dict[str, An
     "modifications_detected": boolean,
     "modification_details": ["list of aftermarket changes detected"],
     "authenticity_notes": "Any mismatch with typical vehicle trim, VIN plate visible, signs of repaint, title/branding inconsistencies",
-    "ai_confidence": 0.0-1.0 number
+    "ai_confidence": 0.0-1.0 number,
+    "identified_vehicle": {
+        "brand": "make if visible, else empty string",
+        "model": "model if visible, else empty string",
+        "variant": "variant if visible, else empty string",
+        "manufacturing_year": "integer year if badge/plate/listing text is readable, else null",
+        "color": "body color if visible, else empty string",
+        "body_type": "Hatchback/Sedan/SUV/MUV/Coupe if identifiable, else empty string"
+    }
 }
-Be specific to Indian used car conditions. Conservative estimates for repair costs in INR rupees."""
+Identify the car make/model from badges, grille, lamps and body shape when possible. Be specific to Indian used car conditions. Conservative estimates for repair costs in INR rupees."""
 
     context_str = f"Vehicle Context: {json.dumps(vehicle_context, indent=2)}\nImage #{image_index}" if vehicle_context else f"Image #{image_index}"
     user_prompt = f"{context_str}\n\nAnalyze this vehicle image according to the system prompt instructions."
