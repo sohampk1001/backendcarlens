@@ -27,17 +27,25 @@ app = FastAPI(
     openapi_url="/openapi.json"
 )
 
-cors_origins_env = os.getenv("CORS_ORIGINS", "http://localhost:5173")
-origins = [o.strip() for o in cors_origins_env.split(",") if o.strip()]
-if not origins:
-    origins = ["http://localhost:5173"]
+cors_origins_env = os.getenv(
+    "CORS_ORIGINS",
+    "http://localhost:5173,https://carlensai.netlify.app",
+)
+origins = [o.strip().rstrip("/") for o in cors_origins_env.split(",") if o.strip()]
 
-if "http://localhost:5173" not in origins:
-    origins.append("http://localhost:5173")
+required_origins = [
+    "http://localhost:5173",
+    "http://127.0.0.1:5173",
+    "https://carlensai.netlify.app",
+]
+for origin in required_origins:
+    if origin not in origins:
+        origins.append(origin)
 
 app.add_middleware(
     CORSMiddleware,
     allow_origins=origins,
+    allow_origin_regex=r"https://.*\.netlify\.app",
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],

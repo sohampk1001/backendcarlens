@@ -64,33 +64,28 @@ def _parse_json_response(content: str) -> Optional[Dict[str, Any]]:
 
 
 def extract_listing_data(description: str, url: Optional[str] = None) -> Dict[str, Any]:
-    system_prompt = """You are an expert used car listing data extractor specializing in the Indian automotive market. Extract all vehicle details from the listing text. Return ONLY valid JSON with these fields:
-    brand, model, variant, manufacturing_year, registration_year, kilometers_driven, fuel_type, transmission, ownership, location, asking_price, color, body_type, insurance_valid, rto.
-    Use null for missing values. asking_price should be a number in INR rupees. kilometers_driven should be a number. manufacturing_year and registration_year should be 4-digit integers. fuel_type must be one of: Petrol, Diesel, CNG, Electric, Hybrid. transmission must be Manual or Automatic. ownership must be First Owner, Second Owner, Third Owner, or Fourth+ Owner."""
+    from app.services.listing_fetch import fetch_listing_text
+    from app.services.listing_parse import heuristic_extract, merge_extract
 
-    user_prompt = f"Extract vehicle data from this listing:\n\nURL: {url or 'N/A'}\n\nListing Description:\n{description}"
+    page_text = fetch_listing_text(url)
+    source = "\n".join([p for p in [url or "", description or "", page_text] if p])
+    heuristic = heuristic_extract(f"{description or ''}\n{page_text}", url)
+
+    system_prompt = """You are an expert used car listing data extractor for India. Extract ONLY facts present in the provided listing text/URL. Never invent a different car. If a field is not in the text, use null. Return ONLY valid JSON with:
+    brand, model, variant, manufacturing_year, registration_year, kilometers_driven, fuel_type, transmission, ownership, location, asking_price, color, body_type, insurance_valid, rto.
+    asking_price must be INR number. kilometers_driven number. years 4-digit. fuel_type: Petrol, Diesel, CNG, Electric, Hybrid. transmission: Manual or Automatic. ownership: First Owner, Second Owner, Third Owner, or Fourth+ Owner."""
+
+    user_prompt = (
+        "Extract vehicle data. Use only this source. Do not substitute another vehicle.\n\n"
+        f"URL: {url or 'N/A'}\n\nListing text:\n{source[:8000]}"
+    )
 
     result = _call_groq(system_prompt, user_prompt, temperature=0.1)
     parsed = _parse_json_response(result) if result else None
-
-    if parsed:
-        return parsed
-
-    return {
-        "brand": None,
-        "model": None,
-        "variant": None,
-        "manufacturing_year": None,
-        "registration_year": None,
-        "kilometers_driven": None,
-        "fuel_type": None,
-        "transmission": None,
-        "ownership": None,
-        "location": None,
-        "asking_price": None,
-        "seller_description": description,
-        "listing_url": url
-    }
+    merged = merge_extract(heuristic, parsed, source)
+    merged["seller_description"] = (description or page_text or merged.get("seller_description") or "")[:4000]
+    merged["listing_url"] = url
+    return merged
 
 
 def analyze_description(description: str, vehicle_details: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
@@ -112,24 +107,35 @@ def analyze_description(description: str, vehicle_details: Optional[Dict[str, An
     if parsed:
         return parsed
 
+    text = (description or "").lower()
+    missing = []
+    if "service" not in text:
+        missing.append("Service history records not mentioned")
+    if "accident" not in text and "claim" not in text:
+        missing.append("Accident history not disclosed")
+    if "insurance" not in text:
+        missing.append("Insurance expiry date missing")
+    positives = []
+    if "first owner" in text or "1st owner" in text:
+        positives.append("First-owner mentioned")
+    if "service" in text:
+        positives.append("Service history mentioned")
+    red = []
+    if "urgent" in text or "need money" in text:
+        red.append("Urgency language in listing")
     return {
-        "condition_indicators": [
-            "Description provides basic information but lacks detailed condition specifics",
-            "No major concerning language detected in description"
-        ],
-        "red_flags": [],
-        "missing_info": [
-            "Service history records not mentioned",
-            "Accident history not disclosed",
-            "Insurance expiry date missing",
-            "Warranty status not specified"
-        ],
-        "seller_honesty_score": 70,
-        "positives": [
-            "Listing includes basic vehicle specifications"
-        ],
-        "maintenance_mentions": [],
-        "summary": "The listing provides standard vehicle information without concerning red flags, but lacks critical transparency around service history, accident status, and remaining warranty. Seller honesty appears moderate with typical used car listing brevity."
+        "condition_indicators": ["Parsed from seller text; visual inspection still required"],
+        "red_flags": red,
+        "missing_info": missing or ["Full inspection report not attached"],
+        "seller_honesty_score": 62 if red else 75,
+        "positives": positives or ["Listing includes some vehicle specifications"],
+        "maintenance_mentions": ["Service mentioned"] if "service" in text else [],
+        "summary": (
+            f"Assessment is based on the seller text provided ({(vehicle_details or {}).get('brand') or 'vehicle'} "
+            f"{(vehicle_details or {}).get('model') or ''}). "
+            "Treat missing accident/service/insurance details as items to verify in person."
+        ),
+        "ai_source": "heuristic" if not _groq_available else "groq_fallback_heuristic",
     }
 
 

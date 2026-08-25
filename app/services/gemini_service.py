@@ -46,6 +46,15 @@ def _decode_base64_image(base64_str: str) -> Optional[bytes]:
         return None
 
 
+def _mime_from_data_uri(image_b64: str) -> str:
+    if image_b64.startswith("data:") and ";base64," in image_b64:
+        header = image_b64.split(";base64,", 1)[0]
+        mime = header.replace("data:", "").strip() or "image/jpeg"
+        if mime in ("image/jpeg", "image/jpg", "image/png", "image/webp", "image/gif"):
+            return "image/jpeg" if mime == "image/jpg" else mime
+    return "image/jpeg"
+
+
 def _call_gemini_with_image(prompt: str, image_b64: str) -> Optional[str]:
     if not _genai_configured or not _genai_model:
         return None
@@ -55,8 +64,9 @@ def _call_gemini_with_image(prompt: str, image_b64: str) -> Optional[str]:
         if not image_bytes:
             return None
 
+        mime = _mime_from_data_uri(image_b64)
         response = _genai_model.generate_content(
-            [prompt, {"mime_type": "image/jpeg", "data": image_bytes}]
+            [prompt, {"mime_type": mime, "data": image_bytes}]
         )
         if response and response.text:
             return response.text
@@ -105,73 +115,32 @@ Be specific to Indian used car conditions. Conservative estimates for repair cos
     parsed = _parse_json_response(result) if result else None
 
     if parsed:
+        parsed["image_index"] = image_index
+        parsed["ai_source"] = "gemini"
         return parsed
 
-    condition_profiles = [
-        {
-            "overall_condition": "Good",
-            "condition_score": 72,
-            "observations": [
-                {"category": "exterior", "observation": "Minor swirl marks and micro-scratches visible on bonnet and roof - typical for 5+ year old vehicle in Indian conditions", "severity": "cosmetic", "requires_professional_inspection": False, "estimated_cost_inr": 3500},
-                {"category": "tyres", "observation": "Front tyres show ~50% tread remaining, rear tyres ~60-65% - replacement likely within 10,000-15,000 km", "severity": "moderate", "requires_professional_inspection": False, "estimated_cost_inr": 24000},
-                {"category": "interior", "observation": "Driver seat bolster and steering wheel show expected wear pattern for stated mileage. No tears or major stains visible", "severity": "minor", "requires_professional_inspection": False, "estimated_cost_inr": 0},
-                {"category": "wheels", "observation": "Alloy wheels have minor curb rash on 2 wheels - cosmetic only, no structural concern", "severity": "cosmetic", "requires_professional_inspection": False, "estimated_cost_inr": 2000}
-            ],
-            "damage_detected": True,
-            "damage_details": [
-                {"type": "scratch", "location": "Front bumper, passenger side corner", "severity": "minor", "repair_estimate_inr": 2500},
-                {"type": "dent", "location": "Rear left door panel - small dent approx 5cm, paint intact", "severity": "minor", "repair_estimate_inr": 4500}
-            ],
-            "modifications_detected": False,
-            "modification_details": [],
-            "authenticity_notes": "Body panels show consistent panel gaps in visible areas. VIN plate not clearly visible in this angle. Paint finish appears consistent across visible panels, no obvious signs of major repaint work. Windscreen has minor chip at bottom edge - can be repaired rather than replaced.",
-            "ai_confidence": 0.72
-        },
-        {
-            "overall_condition": "Very Good",
-            "condition_score": 81,
-            "observations": [
-                {"category": "exterior", "observation": "Paint finish appears largely uniform with expected gloss level for age. Very few visible imperfections beyond normal washing swirls", "severity": "cosmetic", "requires_professional_inspection": False, "estimated_cost_inr": 2000},
-                {"category": "interior", "observation": "Dashboard, door pads, and upholstery in good condition. Controls and switches appear intact and undamaged", "severity": "minor", "requires_professional_inspection": False, "estimated_cost_inr": 0},
-                {"category": "glass", "observation": "All glass surfaces clear without visible cracks or chips. Window tints appear uniform and legally compliant", "severity": "minor", "requires_professional_inspection": False, "estimated_cost_inr": 0},
-                {"category": "tyres", "observation": "Tyre tread depth looks reasonable - recommend measurement during inspection. Branded tyres visible with even wear pattern suggesting proper alignment", "severity": "minor", "requires_professional_inspection": True, "estimated_cost_inr": 0}
-            ],
-            "damage_detected": False,
-            "damage_details": [],
-            "modifications_detected": False,
-            "modification_details": [],
-            "authenticity_notes": "Vehicle appears largely original in presentation. Panel alignment looks consistent. Recommend lift inspection to check underbody and confirm no hidden structural work or corrosion. Badge and trim placement matches factory specifications.",
-            "ai_confidence": 0.78
-        },
-        {
-            "overall_condition": "Fair",
-            "condition_score": 58,
-            "observations": [
-                {"category": "exterior", "observation": "Significant fading evident on roof and bonnet clear coat - sun exposure damage typical of prolonged outdoor parking. Repainting recommended", "severity": "moderate", "requires_professional_inspection": False, "estimated_cost_inr": 35000},
-                {"category": "exterior", "observation": "Multiple stone chips on front bumper and lower fascia from highway use. Fog light housing appears cloudy/fogged on driver side", "severity": "minor", "requires_professional_inspection": False, "estimated_cost_inr": 6000},
-                {"category": "tyres", "observation": "Tyre tread appears critically low on front axle - unsafe for wet conditions. Wheel alignment and balancing overdue indicated by uneven wear pattern", "severity": "severe", "requires_professional_inspection": True, "estimated_cost_inr": 28000},
-                {"category": "interior", "observation": "Driver seat fabric has worn through on bolster edge. Some console trim pieces show scratches. Floor mats heavily soiled with possible water staining - check carpet underneath", "severity": "moderate", "requires_professional_inspection": True, "estimated_cost_inr": 8500}
-            ],
-            "damage_detected": True,
-            "damage_details": [
-                {"type": "paint_damage", "location": "Roof and bonnet - clear coat oxidation and fading", "severity": "moderate", "repair_estimate_inr": 35000},
-                {"type": "dent", "location": "Rear quarter panel, driver side - visible crease 10-12cm", "severity": "moderate", "repair_estimate_inr": 8000},
-                {"type": "rust", "location": "Lower sill edges - surface rust starting, not perforated yet", "severity": "moderate", "repair_estimate_inr": 12000}
-            ],
-            "modifications_detected": True,
-            "modification_details": [
-                "Aftermarket roof spoiler installed - verify fit quality and waterproofing around mounting points",
-                "Non-OEM headlamp bulbs/LEDs - check electrical wiring and reflector heat damage",
-                "Window rain visors - cosmetic addition, verify door rubber seal not damaged"
-            ],
-            "authenticity_notes": "Signs of non-factory paint work on rear quarter panel visible through texture inconsistency. VIN not visible. Strongly recommend paint thickness gauge measurement across all panels to identify previous accident repair areas. Check A/B/C pillar joints and door frame for weld marks indicating structural damage repair.",
-            "ai_confidence": 0.68
-        }
-    ]
-
-    profile = condition_profiles[image_index % len(condition_profiles)]
-    profile["image_index"] = image_index
-    return profile
+    reason = "Gemini did not return a usable visual analysis for this image."
+    if not _genai_configured:
+        reason = "GEMINI_API_KEY is not configured on the server."
+    return {
+        "image_index": image_index,
+        "overall_condition": "Unknown",
+        "condition_score": 0,
+        "observations": [{
+            "category": "system",
+            "observation": reason + " Upload a clear car photo (exterior/interior) and try again.",
+            "severity": "minor",
+            "requires_professional_inspection": True,
+            "estimated_cost_inr": 0,
+        }],
+        "damage_detected": False,
+        "damage_details": [],
+        "modifications_detected": False,
+        "modification_details": [],
+        "authenticity_notes": reason,
+        "ai_confidence": 0.0,
+        "ai_source": "unavailable",
+    }
 
 
 def analyze_listing_screenshot(image_b64: str) -> Dict[str, Any]:

@@ -15,6 +15,7 @@ from app.models.schemas import (
     ComparisonItem, Recommendation
 )
 from app.services import groq_service, gemini_service, analysis_engine
+from app.services.market_data import get_market_context_summary, get_demand_score, is_high_demand
 
 router = APIRouter(prefix="/api", tags=["analysis"])
 logger = logging.getLogger(__name__)
@@ -33,6 +34,13 @@ async def health_check():
 
 
 def _enrich_from_ai_extract(vehicle: VehicleDetails, description: Optional[str], url: Optional[str]) -> VehicleDetails:
+    current = vehicle.model_dump()
+    if url and not current.get("listing_url"):
+        current["listing_url"] = url
+    if description and not current.get("seller_description"):
+        current["seller_description"] = description
+    vehicle = VehicleDetails(**current)
+
     if not description and not vehicle.seller_description and not url:
         return vehicle
 
@@ -42,7 +50,9 @@ def _enrich_from_ai_extract(vehicle: VehicleDetails, description: Optional[str],
         if extracted:
             current = vehicle.model_dump()
             for key, val in extracted.items():
-                if val is not None and key in VehicleDetails.model_fields and (current.get(key) is None or current.get(key) == ""):
+                if val is not None and key in VehicleDetails.model_fields and (
+                    current.get(key) is None or current.get(key) == ""
+                ):
                     current[key] = val
             vehicle = VehicleDetails(**current)
     except Exception as e:
@@ -51,29 +61,35 @@ def _enrich_from_ai_extract(vehicle: VehicleDetails, description: Optional[str],
 
 
 def _fill_defaults(vehicle: VehicleDetails) -> VehicleDetails:
+    """Only fill fields that are completely missing — never overwrite user-provided data."""
     data = vehicle.model_dump()
-    defaults = {
-        "brand": "Toyota",
-        "model": "Innova Crysta",
-        "variant": "2.4 VX 7 STR",
-        "manufacturing_year": 2019,
-        "registration_year": 2019,
-        "kilometers_driven": 58000,
-        "fuel_type": "Diesel",
+    # Only apply safe fallbacks for non-critical fields
+    safe_defaults = {
+        "fuel_type": "Petrol",
         "transmission": "Manual",
-        "ownership": "Second Owner",
-        "location": "Bengaluru, Karnataka",
-        "asking_price": 1625000,
-        "color": "White",
-        "body_type": "SUV/MUV",
-        "insurance_valid": "Valid",
-        "rto": "KA-01",
-        "seller_description": "Well maintained Toyota Innova Crysta 2.4 VX, single user company car, all services done at authorized Toyota dealer. Accident free. Original paint. Insurance valid till Dec 2026. New tyres changed 5000 km back. All documents complete including original service book. Reason for sale: upgrading to SUV. Test drive welcome at our office in HSR Layout. Price slightly negotiable for serious buyers only. No time pass please.",
-        "listing_url": None
+        "ownership": "First Owner",
+        "color": "Not specified",
+        "body_type": "Unknown",
+        "insurance_valid": "Unknown",
+        "rto": "",
+        "seller_description": "",
+        "listing_url": None,
     }
-    for k, v in defaults.items():
+    for k, v in safe_defaults.items():
         if data.get(k) is None or (isinstance(data.get(k), str) and data[k].strip() == ""):
             data[k] = v
+    # Critical fields — only fill if both brand AND model are missing (completely blank submission)
+    if not data.get("brand") and not data.get("model"):
+        data["brand"] = "Unknown"
+        data["model"] = "Unknown"
+    if not data.get("manufacturing_year"):
+        data["manufacturing_year"] = 2020
+    if not data.get("kilometers_driven"):
+        data["kilometers_driven"] = 50000
+    if not data.get("asking_price"):
+        data["asking_price"] = 500000
+    if not data.get("location"):
+        data["location"] = "India"
     return VehicleDetails(**data)
 
 
@@ -87,10 +103,22 @@ async def analyze_full_pipeline(request: AnalysisRequest):
         images_b64 = request.images or []
         desc = request.description or vehicle.seller_description
 
+        # Inject market context into description for better AI analysis
+        market_ctx = get_market_context_summary()
+        demand = get_demand_score(vehicle.brand or '', vehicle.model or '')
+        high_demand = is_high_demand(vehicle.model or '')
+        enriched_desc = (
+            f"{desc}\n\n"
+            f"[Market Context: {market_ctx} "
+            f"Demand score for {vehicle.brand} {vehicle.model}: {demand}/100. "
+            f"{'High demand model — expect stronger resale value.' if high_demand else 'Moderate demand model.'}"
+            f"]"
+        )
+
         pipeline_result = analysis_engine.run_full_pipeline(
             vehicle=vehicle,
             images_b64=images_b64,
-            description=desc,
+            description=enriched_desc,
             listing_url=request.listing_url
         )
 
@@ -117,7 +145,8 @@ async def analyze_listing_only(
                 logger.warning(f"Could not parse manual_details JSON: {pe}")
 
         if listing_url and not description:
-            description = "Listing data fetched from: " + listing_url
+            from app.services.listing_fetch import fetch_listing_text
+            description = fetch_listing_text(listing_url)
 
         vehicle = _enrich_from_ai_extract(vehicle, description, listing_url)
         vehicle = _fill_defaults(vehicle)
@@ -252,6 +281,114 @@ async def analyze_images(
     except Exception as e:
         logger.exception(f"Image analysis failed: {e}")
         raise HTTPException(status_code=500, detail=f"Image analysis failed: {str(e)}")
+
+
+@router.post("/analyze/screenshots")
+async def analyze_screenshots(
+    files: List[UploadFile] = File(..., description="Listing screenshots"),
+    vehicle_json: Optional[str] = Form(None),
+):
+    try:
+        vehicle = VehicleDetails()
+        extra_desc = ""
+        if vehicle_json:
+            try:
+                data = json.loads(vehicle_json)
+                extra_desc = data.get("seller_description") or ""
+                vehicle = VehicleDetails(**{k: v for k, v in data.items() if k in VehicleDetails.model_fields})
+            except Exception as pe:
+                logger.warning(f"Parsing vehicle_json failed: {pe}")
+
+        images_b64 = []
+        ocr_chunks = []
+        for f in files:
+            content = await f.read()
+            import base64
+            b64 = base64.b64encode(content).decode("utf-8")
+            mime = f.content_type or "image/jpeg"
+            data_uri = f"data:{mime};base64,{b64}"
+            images_b64.append(data_uri)
+            shot = gemini_service.analyze_listing_screenshot(data_uri)
+            extracted = (shot or {}).get("vehicle_details_extracted") or {}
+            ocr_text = (shot or {}).get("listing_text_ocr") or ""
+            if ocr_text:
+                ocr_chunks.append(ocr_text)
+            current = vehicle.model_dump()
+            for key, val in extracted.items():
+                if val is not None and key in VehicleDetails.model_fields and (
+                    current.get(key) is None or current.get(key) == ""
+                ):
+                    current[key] = val
+            vehicle = VehicleDetails(**current)
+
+        combined_desc = "\n".join([p for p in [extra_desc, *ocr_chunks] if p])
+        vehicle = _enrich_from_ai_extract(vehicle, combined_desc, vehicle.listing_url)
+        vehicle = _fill_defaults(vehicle)
+
+        vehicle_dict = vehicle.model_dump()
+        image_results_raw = gemini_service.analyze_multiple_images(images_b64, vehicle_dict)
+        image_scores = [r.get("condition_score", 0) for r in image_results_raw]
+
+        image_analyses = []
+        for idx, img_r in enumerate(image_results_raw):
+            obs = [{
+                "category": o.get("category", ""),
+                "observation": o.get("observation", ""),
+                "severity": str(o.get("severity", "medium")),
+                "requires_professional_inspection": o.get("requires_professional_inspection", False),
+                "confidence": float(img_r.get("ai_confidence", 0.0)),
+            } for o in img_r.get("observations", [])]
+            dmg = [{
+                "type": d.get("type", ""),
+                "location": d.get("location", ""),
+                "severity": d.get("severity", ""),
+                "cost": d.get("repair_estimate_inr", 0),
+            } for d in img_r.get("damage_details", [])]
+            image_analyses.append(ImageAnalysis(
+                image_index=idx,
+                overall_condition=img_r.get("overall_condition", "Unknown"),
+                condition_score=img_r.get("condition_score", 0),
+                observations=obs,
+                damage_detected=img_r.get("damage_detected", False),
+                damage_details=dmg,
+                modifications_detected=img_r.get("modifications_detected", False),
+                modification_details=img_r.get("modification_details", []),
+                authenticity_notes=img_r.get("authenticity_notes", ""),
+                ai_confidence=img_r.get("ai_confidence", 0.0),
+            ))
+
+        desc_analysis = groq_service.analyze_description(combined_desc, vehicle_dict)
+        price_est = analysis_engine.calculate_fair_price(vehicle)
+        ownership = analysis_engine.calculate_ownership_costs(vehicle, price_est)
+        risks = analysis_engine.detect_risks(vehicle, price_est, desc_analysis, image_results_raw)
+        comparables = analysis_engine.find_comparable_vehicles(vehicle, price_est)
+        deal = analysis_engine.calculate_deal_score(vehicle, price_est, risks, image_scores)
+        neg = analysis_engine.generate_negotiation_range(vehicle, price_est, risks, ownership)
+        rec = analysis_engine.generate_recommendation(deal, risks, price_est)
+        avg_condition = (sum(image_scores) / len(image_scores)) if image_scores else 0
+
+        return {
+            "vehicle": vehicle,
+            "image_analyses": image_analyses,
+            "average_condition_score": avg_condition,
+            "overall_verdict": f"Screenshot OCR + visual analysis complete. Condition {avg_condition:.0f}/100.",
+            "price_estimate": price_est,
+            "deal_score": deal,
+            "risks": risks,
+            "comparables": comparables,
+            "ownership_costs": ownership,
+            "negotiation": neg,
+            "recommendation": rec,
+            "description_analysis": desc_analysis,
+            "image_count": len(images_b64),
+            "analysis_id": str(uuid.uuid4()),
+            "created_at": datetime.now().isoformat(),
+        }
+    except HTTPException as he:
+        raise he
+    except Exception as e:
+        logger.exception(f"Screenshot analysis failed: {e}")
+        raise HTTPException(status_code=500, detail=f"Screenshot analysis failed: {str(e)}")
 
 
 @router.post("/compare", response_model=ComparisonResult)
