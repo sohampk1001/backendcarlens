@@ -640,3 +640,180 @@ Keep responses concise (under 150 words), friendly, and helpful. For full analys
     except Exception as e:
         logger.exception(f"Chat endpoint failed: {e}")
         raise HTTPException(status_code=500, detail=f"Chat failed: {str(e)}")
+
+
+# ── Vehicle Master DB Endpoints ───────────────────────────────────────────────
+
+@router.get("/vehicles/makes")
+async def get_makes():
+    """Get all manufacturers from the vehicle master DB."""
+    try:
+        from app.database import get_all_manufacturers
+        makes = get_all_manufacturers()
+        return {"makes": makes, "count": len(makes)}
+    except Exception as e:
+        logger.exception(f"get_makes failed: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.get("/vehicles/models/{manufacturer_slug}")
+async def get_models(manufacturer_slug: str):
+    """Get all models for a manufacturer."""
+    try:
+        from app.database import get_models_by_manufacturer
+        models = get_models_by_manufacturer(manufacturer_slug)
+        return {"models": models, "count": len(models), "manufacturer": manufacturer_slug}
+    except Exception as e:
+        logger.exception(f"get_models failed: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.get("/vehicles/years/{manufacturer_slug}/{model_slug}")
+async def get_years(manufacturer_slug: str, model_slug: str):
+    """Get available years for a model."""
+    try:
+        from app.database import get_model_years
+        years = get_model_years(model_slug, manufacturer_slug)
+        return {"years": [y["model_year"] for y in years], "model": model_slug}
+    except Exception as e:
+        logger.exception(f"get_years failed: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.get("/vehicles/variants/{model_slug}/{year}")
+async def get_variants(model_slug: str, year: int):
+    """Get variants for a model year."""
+    try:
+        from app.database import get_variants
+        variants = get_variants(model_slug, year)
+        return {"variants": variants, "count": len(variants)}
+    except Exception as e:
+        logger.exception(f"get_variants failed: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+# ── Listings Endpoints ────────────────────────────────────────────────────────
+
+@router.get("/listings/search")
+async def search_listings(
+    brand: Optional[str] = None,
+    model: Optional[str] = None,
+    year: Optional[int] = None,
+    fuel: Optional[str] = None,
+    transmission: Optional[str] = None,
+    location: Optional[str] = None,
+    min_price: Optional[int] = None,
+    max_price: Optional[int] = None,
+    max_km: Optional[int] = None,
+    limit: int = 20,
+    offset: int = 0,
+):
+    """Search used car listings from the listings database."""
+    try:
+        from app.database import get_listings, get_listing_count
+        listings = get_listings(
+            brand=brand, model=model, year=year,
+            fuel=fuel, transmission=transmission, location=location,
+            min_price=min_price, max_price=max_price, max_km=max_km,
+            limit=limit, offset=offset,
+        )
+        total = get_listing_count(brand=brand, model=model, year=year)
+        return {
+            "listings": listings,
+            "total": total,
+            "limit": limit,
+            "offset": offset,
+            "has_more": (offset + limit) < total,
+        }
+    except Exception as e:
+        logger.exception(f"search_listings failed: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.get("/listings/market-stats")
+async def market_stats(
+    brand: str,
+    model: str,
+    year: Optional[int] = None,
+):
+    """Get observed market price stats for a vehicle."""
+    try:
+        from app.database import get_market_stats
+        stats = get_market_stats(brand=brand, model=model, year=year)
+        return {
+            "brand": brand,
+            "model": model,
+            "year": year,
+            "stats": stats,
+            "data_type": "observed_market_data",
+            "note": "Based on observed listings — not a guaranteed price.",
+            "last_computed": datetime.now().isoformat(),
+        }
+    except Exception as e:
+        logger.exception(f"market_stats failed: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+# ── RSS Sync Endpoints ────────────────────────────────────────────────────────
+
+@router.post("/rss/sync")
+async def sync_rss():
+    """Fetch RSS feed and store new items. Trigger periodically."""
+    try:
+        from app.services.rss_service import sync_rss_to_db
+        result = sync_rss_to_db()
+        return result
+    except Exception as e:
+        logger.exception(f"RSS sync failed: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.post("/rss/process")
+async def process_rss(limit: int = 10):
+    """Run Groq extraction on unprocessed RSS items → listings DB."""
+    try:
+        from app.services.rss_service import process_unprocessed_items
+        result = process_unprocessed_items(limit=limit)
+        return result
+    except Exception as e:
+        logger.exception(f"RSS process failed: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+# ── Fix /api/save to persist to Neon DB ──────────────────────────────────────
+
+@router.post("/save/analysis")
+async def save_analysis_to_db(data: dict):
+    """Persist an analysis result to Neon DB."""
+    try:
+        from app.database import save_analysis
+        analysis_id = data.get("id") or data.get("analysis_id") or str(uuid.uuid4())
+        save_analysis(analysis_id, data)
+        return {"saved": True, "id": analysis_id}
+    except Exception as e:
+        logger.exception(f"save_analysis_to_db failed: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.get("/saved/analyses")
+async def get_saved_from_db(session: str = "default", limit: int = 50):
+    """Get saved analyses from Neon DB."""
+    try:
+        from app.database import get_saved_analyses
+        records = get_saved_analyses(session=session, limit=limit)
+        return {"records": records, "count": len(records)}
+    except Exception as e:
+        logger.exception(f"get_saved_from_db failed: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.delete("/saved/analyses/{analysis_id}")
+async def delete_saved_analysis(analysis_id: str):
+    """Delete a saved analysis from Neon DB."""
+    try:
+        from app.database import delete_analysis
+        delete_analysis(analysis_id)
+        return {"deleted": True, "id": analysis_id}
+    except Exception as e:
+        logger.exception(f"delete_saved_analysis failed: {e}")
+        raise HTTPException(status_code=500, detail=str(e))

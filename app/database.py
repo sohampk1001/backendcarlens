@@ -1,100 +1,83 @@
 """
-Neon PostgreSQL connection using requests (HTTP API).
-No psycopg2 or SQLAlchemy needed.
+Car Lens — Neon PostgreSQL database layer.
+Handles vehicle master DB + listings DB + market stats + saved analyses.
 """
 import os
 import json
 import logging
 import requests
-from urllib.parse import urlparse
+import warnings
 from dotenv import load_dotenv
+from app.db_schema import VEHICLE_MASTER_TABLES, LISTINGS_TABLES, MANUFACTURER_SEED, MODEL_SEED
 
 load_dotenv()
-
 logger = logging.getLogger(__name__)
-
 DATABASE_URL = os.getenv("DATABASE_URL", "")
 
 _db_available = False
-_conn = None
 
-# Try native psycopg2 first, fall back to requests-based HTTP if unavailable
+# ── Connection ─────────────────────────────────────────────────────────────────
+
 try:
     import psycopg2
     import psycopg2.extras
 
-    def get_connection():
+    def _get_conn():
         return psycopg2.connect(DATABASE_URL)
 
     def execute_query(sql: str, params=None, fetch=True):
+        conn = _get_conn()
         try:
-            conn = get_connection()
             cur = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
             cur.execute(sql, params or ())
             if fetch:
                 rows = cur.fetchall()
-                conn.close()
-                return [dict(r) for r in rows]
-            else:
                 conn.commit()
-                conn.close()
-                return []
+                return [dict(r) for r in rows]
+            conn.commit()
+            return []
         except Exception as e:
+            conn.rollback()
             logger.error(f"DB query failed: {e}")
             raise
+        finally:
+            conn.close()
 
     _db_available = True
-    logger.info("Database: psycopg2 connected to Neon PostgreSQL")
+    logger.info("Database: psycopg2 connected")
 
 except ImportError:
-    # Fall back to Neon HTTP API
     try:
-        parsed = urlparse(DATABASE_URL.replace("postgresql://", "https://").split("?")[0])
-        _neon_user = parsed.username
-        _neon_password = parsed.password
-        _neon_host = parsed.hostname
-        _neon_db = parsed.path.lstrip("/")
-        _neon_http_url = f"https://{_neon_host}/sql"
+        from urllib.parse import urlparse
+        _host = urlparse(DATABASE_URL.split("?")[0]).hostname
+        _neon_http_url = f"https://{_host}/sql"
 
         def execute_query(sql: str, params=None, fetch=True):
-            try:
-                headers = {
-                    "Content-Type": "application/json",
-                    "Neon-Connection-String": DATABASE_URL,
-                }
+            with warnings.catch_warnings():
+                warnings.simplefilter("ignore")
+                headers = {"Content-Type": "application/json", "Neon-Connection-String": DATABASE_URL}
                 body = {"query": sql, "params": list(params) if params else []}
-                resp = requests.post(
-                    _neon_http_url,
-                    json=body,
-                    headers=headers,
-                    timeout=10,
-                    verify=False,
-                )
+                resp = requests.post(_neon_http_url, json=body, headers=headers, timeout=15, verify=False)
                 resp.raise_for_status()
                 data = resp.json()
-                if fetch:
-                    rows = data.get("rows", [])
-                    return rows
-                return []
-            except Exception as e:
-                logger.error(f"Neon HTTP query failed: {e}")
-                raise
+                return data.get("rows", []) if fetch else []
 
         _db_available = True
         logger.info("Database: Neon HTTP API connected")
-
     except Exception as e:
         logger.warning(f"Database unavailable: {e}")
-        _db_available = False
 
+        def execute_query(sql, params=None, fetch=True):
+            logger.warning("DB not available — query skipped")
+            return []
+
+
+# ── Schema Init ────────────────────────────────────────────────────────────────
 
 def init_db():
-    """Create tables if they don't exist."""
     if not _db_available:
-        logger.warning("DB not available, skipping init")
         return
-
-    tables = [
+    all_tables = VEHICLE_MASTER_TABLES + LISTINGS_TABLES + [
         """
         CREATE TABLE IF NOT EXISTS saved_analyses (
             id TEXT PRIMARY KEY,
@@ -122,45 +105,322 @@ def init_db():
         )
         """,
     ]
-
-    for sql in tables:
+    for sql in all_tables:
         try:
             execute_query(sql.strip(), fetch=False)
-            logger.info("DB table initialized")
         except Exception as e:
             logger.error(f"Table init failed: {e}")
+    logger.info("DB schema initialized")
+    _seed_manufacturers()
+    _seed_models()
 
+
+def _seed_manufacturers():
+    try:
+        existing = execute_query("SELECT COUNT(*) as c FROM manufacturers")
+        count = int(existing[0].get("c", 0)) if existing else 0
+        if count > 0:
+            return
+        for name, slug, country in MANUFACTURER_SEED:
+            try:
+                execute_query(
+                    "INSERT INTO manufacturers (name, slug, country) VALUES (%s, %s, %s) ON CONFLICT DO NOTHING",
+                    (name, slug, country), fetch=False
+                )
+            except Exception:
+                pass
+        logger.info(f"Seeded {len(MANUFACTURER_SEED)} manufacturers")
+    except Exception as e:
+        logger.warning(f"Manufacturer seed failed: {e}")
+
+
+def _seed_models():
+    try:
+        existing = execute_query("SELECT COUNT(*) as c FROM vehicle_models")
+        count = int(existing[0].get("c", 0)) if existing else 0
+        if count > 0:
+            return
+        for mfr_slug, model_name, model_slug, body_type, segment, first_yr, latest_yr in MODEL_SEED:
+            try:
+                mfr = execute_query("SELECT id FROM manufacturers WHERE slug = %s", (mfr_slug,))
+                if not mfr:
+                    continue
+                mfr_id = mfr[0]["id"]
+                execute_query(
+                    """INSERT INTO vehicle_models
+                       (manufacturer_id, name, slug, body_type, segment, first_year, latest_year)
+                       VALUES (%s, %s, %s, %s, %s, %s, %s) ON CONFLICT DO NOTHING""",
+                    (mfr_id, model_name, model_slug, body_type, segment, first_yr, latest_yr),
+                    fetch=False
+                )
+            except Exception:
+                pass
+        logger.info(f"Seeded {len(MODEL_SEED)} models")
+    except Exception as e:
+        logger.warning(f"Model seed failed: {e}")
+
+
+# ── Vehicle Discovery ──────────────────────────────────────────────────────────
+
+def get_all_manufacturers(active_only=True):
+    try:
+        sql = "SELECT id, name, slug, country FROM manufacturers"
+        if active_only:
+            sql += " WHERE active = TRUE"
+        sql += " ORDER BY name"
+        return execute_query(sql)
+    except Exception as e:
+        logger.error(f"get_all_manufacturers: {e}")
+        return []
+
+
+def get_models_by_manufacturer(manufacturer_slug: str):
+    try:
+        return execute_query(
+            """SELECT vm.id, vm.name, vm.slug, vm.body_type, vm.segment,
+                      vm.first_year, vm.latest_year
+               FROM vehicle_models vm
+               JOIN manufacturers m ON vm.manufacturer_id = m.id
+               WHERE m.slug = %s AND vm.active = TRUE
+               ORDER BY vm.name""",
+            (manufacturer_slug,)
+        )
+    except Exception as e:
+        logger.error(f"get_models_by_manufacturer: {e}")
+        return []
+
+
+def get_model_years(model_slug: str, manufacturer_slug: str):
+    try:
+        return execute_query(
+            """SELECT DISTINCT vy.model_year
+               FROM vehicle_years vy
+               JOIN vehicle_generations vg ON vy.generation_id = vg.id
+               JOIN vehicle_models vm ON vg.model_id = vm.id
+               JOIN manufacturers m ON vm.manufacturer_id = m.id
+               WHERE vm.slug = %s AND m.slug = %s
+               ORDER BY vy.model_year DESC""",
+            (model_slug, manufacturer_slug)
+        )
+    except Exception as e:
+        logger.error(f"get_model_years: {e}")
+        return []
+
+
+def get_variants(model_slug: str, year: int):
+    try:
+        return execute_query(
+            """SELECT vv.*
+               FROM vehicle_variants vv
+               JOIN vehicle_years vy ON vv.year_id = vy.id
+               JOIN vehicle_generations vg ON vy.generation_id = vg.id
+               JOIN vehicle_models vm ON vg.model_id = vm.id
+               WHERE vm.slug = %s AND vy.model_year = %s
+               ORDER BY vv.ex_showroom_price""",
+            (model_slug, year)
+        )
+    except Exception as e:
+        logger.error(f"get_variants: {e}")
+        return []
+
+
+# ── Listings ───────────────────────────────────────────────────────────────────
+
+def get_listings(brand: str = None, model: str = None, year: int = None,
+                 fuel: str = None, transmission: str = None,
+                 location: str = None, min_price: int = None,
+                 max_price: int = None, max_km: int = None,
+                 limit: int = 50, offset: int = 0):
+    try:
+        conditions = ["listing_status = 'ACTIVE_OBSERVED'"]
+        params = []
+        if brand:
+            conditions.append("LOWER(brand) = LOWER(%s)")
+            params.append(brand)
+        if model:
+            conditions.append("LOWER(model) LIKE LOWER(%s)")
+            params.append(f"%{model}%")
+        if year:
+            conditions.append("manufacturing_year = %s")
+            params.append(year)
+        if fuel:
+            conditions.append("LOWER(fuel_type) = LOWER(%s)")
+            params.append(fuel)
+        if transmission:
+            conditions.append("LOWER(transmission) = LOWER(%s)")
+            params.append(transmission)
+        if location:
+            conditions.append("LOWER(location) LIKE LOWER(%s)")
+            params.append(f"%{location}%")
+        if min_price:
+            conditions.append("asking_price >= %s")
+            params.append(min_price)
+        if max_price:
+            conditions.append("asking_price <= %s")
+            params.append(max_price)
+        if max_km:
+            conditions.append("kilometres <= %s")
+            params.append(max_km)
+
+        where = " AND ".join(conditions)
+        params.extend([limit, offset])
+        return execute_query(
+            f"""SELECT id, title, brand, model, variant, manufacturing_year,
+                       registration_year, asking_price, kilometres, fuel_type,
+                       transmission, color, ownership, location, seller_type,
+                       images, listing_status, deal_score, fair_price_estimate,
+                       price_status, source, source_url, first_seen_at, last_seen_at
+                FROM listings WHERE {where}
+                ORDER BY last_seen_at DESC LIMIT %s OFFSET %s""",
+            params
+        )
+    except Exception as e:
+        logger.error(f"get_listings: {e}")
+        return []
+
+
+def get_listing_count(brand: str = None, model: str = None, year: int = None) -> int:
+    try:
+        conditions = ["listing_status = 'ACTIVE_OBSERVED'"]
+        params = []
+        if brand:
+            conditions.append("LOWER(brand) = LOWER(%s)")
+            params.append(brand)
+        if model:
+            conditions.append("LOWER(model) LIKE LOWER(%s)")
+            params.append(f"%{model}%")
+        if year:
+            conditions.append("manufacturing_year = %s")
+            params.append(year)
+        where = " AND ".join(conditions)
+        rows = execute_query(f"SELECT COUNT(*) as c FROM listings WHERE {where}", params)
+        return rows[0].get("c", 0) if rows else 0
+    except Exception as e:
+        logger.error(f"get_listing_count: {e}")
+        return 0
+
+
+def upsert_listing(listing: dict):
+    try:
+        execute_query(
+            """INSERT INTO listings
+               (id, source, source_url, source_item_id, title, description,
+                asking_price, kilometres, registration_year, manufacturing_year,
+                brand, model, variant, fuel_type, transmission, color, ownership,
+                location, seller_type, images, published_at, listing_status,
+                extraction_status, groq_extracted)
+               VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
+               ON CONFLICT (id) DO UPDATE SET
+                 last_seen_at = NOW(),
+                 listing_status = EXCLUDED.listing_status,
+                 asking_price = EXCLUDED.asking_price,
+                 groq_extracted = EXCLUDED.groq_extracted,
+                 updated_at = NOW()""",
+            (
+                listing.get("id"), listing.get("source"), listing.get("source_url"),
+                listing.get("source_item_id"), listing.get("title"), listing.get("description"),
+                listing.get("asking_price"), listing.get("kilometres"), listing.get("registration_year"),
+                listing.get("manufacturing_year"), listing.get("brand"), listing.get("model"),
+                listing.get("variant"), listing.get("fuel_type"), listing.get("transmission"),
+                listing.get("color"), listing.get("ownership"), listing.get("location"),
+                listing.get("seller_type"), json.dumps(listing.get("images", [])),
+                listing.get("published_at"), listing.get("listing_status", "ACTIVE_OBSERVED"),
+                listing.get("extraction_status", "PENDING"),
+                json.dumps(listing.get("groq_extracted", {})),
+            ),
+            fetch=False
+        )
+        return True
+    except Exception as e:
+        logger.error(f"upsert_listing: {e}")
+        return False
+
+
+def get_market_stats(brand: str, model: str, year: int = None):
+    try:
+        params = [brand.lower(), f"%{model.lower()}%"]
+        sql = """SELECT COUNT(*) as count,
+                        MIN(asking_price) as min_price,
+                        MAX(asking_price) as max_price,
+                        PERCENTILE_CONT(0.5) WITHIN GROUP (ORDER BY asking_price) as median_price,
+                        AVG(asking_price)::BIGINT as avg_price,
+                        AVG(kilometres)::INTEGER as avg_km
+                 FROM listings
+                 WHERE listing_status = 'ACTIVE_OBSERVED'
+                   AND LOWER(brand) = %s AND LOWER(model) LIKE %s"""
+        if year:
+            sql += " AND manufacturing_year = %s"
+            params.append(year)
+        rows = execute_query(sql, params)
+        return rows[0] if rows else {}
+    except Exception as e:
+        logger.error(f"get_market_stats: {e}")
+        return {}
+
+
+# ── RSS Feed ───────────────────────────────────────────────────────────────────
+
+def rss_item_exists(guid: str) -> bool:
+    try:
+        rows = execute_query("SELECT id FROM rss_feed_items WHERE guid = %s", (guid,))
+        return len(rows) > 0
+    except Exception:
+        return False
+
+
+def insert_rss_item(item: dict):
+    try:
+        execute_query(
+            """INSERT INTO rss_feed_items (guid, title, description, url, image_url, published_at, raw_xml)
+               VALUES (%s, %s, %s, %s, %s, %s, %s) ON CONFLICT (guid) DO NOTHING""",
+            (item.get("guid"), item.get("title"), item.get("description"),
+             item.get("url"), item.get("image_url"), item.get("published_at"), item.get("raw_xml")),
+            fetch=False
+        )
+        return True
+    except Exception as e:
+        logger.error(f"insert_rss_item: {e}")
+        return False
+
+
+def get_unprocessed_rss_items(limit=20):
+    try:
+        return execute_query(
+            "SELECT * FROM rss_feed_items WHERE processed = FALSE ORDER BY fetched_at ASC LIMIT %s",
+            (limit,)
+        )
+    except Exception as e:
+        logger.error(f"get_unprocessed_rss_items: {e}")
+        return []
+
+
+def mark_rss_item_processed(item_id: int):
+    try:
+        execute_query("UPDATE rss_feed_items SET processed = TRUE WHERE id = %s", (item_id,), fetch=False)
+    except Exception as e:
+        logger.error(f"mark_rss_item_processed: {e}")
+
+
+# ── Saved Analyses ─────────────────────────────────────────────────────────────
 
 def save_analysis(analysis_id: str, data: dict, session: str = "default"):
-    """Save a car analysis to DB."""
     if not _db_available:
         return False
     try:
         vehicle = data.get("vehicle", {})
         execute_query(
-            """
-            INSERT INTO saved_analyses
-                (id, user_session, vehicle_brand, vehicle_model, vehicle_year,
-                 vehicle_variant, asking_price, fair_price_avg, deal_score, recommendation, full_data)
-            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
-            ON CONFLICT (id) DO UPDATE SET
-                full_data = EXCLUDED.full_data,
-                saved_at = NOW()
-            """,
-            (
-                analysis_id,
-                session,
-                vehicle.get("brand", ""),
-                vehicle.get("model", ""),
-                vehicle.get("year", 0),
-                vehicle.get("variant", ""),
-                data.get("askingPrice", 0),
-                data.get("fairPrice", {}).get("avg", 0),
-                data.get("dealScore", {}).get("overall", 0),
-                data.get("recommendation", ""),
-                json.dumps(data),
-            ),
-            fetch=False,
+            """INSERT INTO saved_analyses
+               (id, user_session, vehicle_brand, vehicle_model, vehicle_year,
+                vehicle_variant, asking_price, fair_price_avg, deal_score, recommendation, full_data)
+               VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
+               ON CONFLICT (id) DO UPDATE SET
+                 full_data = EXCLUDED.full_data, saved_at = NOW()""",
+            (analysis_id, session, vehicle.get("brand",""), vehicle.get("model",""),
+             vehicle.get("year", 0), vehicle.get("variant",""),
+             data.get("askingPrice", 0), data.get("fairPrice", {}).get("avg", 0),
+             data.get("dealScore", {}).get("overall", 0), data.get("recommendation",""),
+             json.dumps(data)),
+            fetch=False
         )
         return True
     except Exception as e:
@@ -169,27 +429,32 @@ def save_analysis(analysis_id: str, data: dict, session: str = "default"):
 
 
 def get_saved_analyses(session: str = "default", limit: int = 50):
-    """Get all saved analyses."""
     if not _db_available:
         return []
     try:
         rows = execute_query(
             "SELECT full_data FROM saved_analyses WHERE user_session = %s ORDER BY saved_at DESC LIMIT %s",
-            (session, limit),
+            (session, limit)
         )
-        return [json.loads(r["full_data"]) if isinstance(r.get("full_data"), str) else r.get("full_data", {}) for r in rows]
+        result = []
+        for r in rows:
+            fd = r.get("full_data")
+            if isinstance(fd, str):
+                result.append(json.loads(fd))
+            elif isinstance(fd, dict):
+                result.append(fd)
+        return result
     except Exception as e:
-        logger.error(f"get_saved failed: {e}")
+        logger.error(f"get_saved_analyses: {e}")
         return []
 
 
 def delete_analysis(analysis_id: str):
-    """Delete a saved analysis."""
     if not _db_available:
         return False
     try:
         execute_query("DELETE FROM saved_analyses WHERE id = %s", (analysis_id,), fetch=False)
         return True
     except Exception as e:
-        logger.error(f"delete_analysis failed: {e}")
+        logger.error(f"delete_analysis: {e}")
         return False
